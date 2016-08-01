@@ -1,6 +1,9 @@
 package com.gsgl.harddecodetest;
 
+import android.annotation.TargetApi;
+import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.ImageFormat;
 import android.graphics.Rect;
 import android.graphics.YuvImage;
@@ -9,13 +12,15 @@ import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaExtractor;
 import android.media.MediaFormat;
+import android.os.Build;
 import android.util.Log;
+import android.view.SurfaceHolder;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.concurrent.LinkedBlockingQueue;
 
 
 public class MediaCodecTools {
@@ -29,6 +34,7 @@ public class MediaCodecTools {
     public static final int FILE_TypeI420 = 1;
     public static final int FILE_TypeNV21 = 2;
     public static final int FILE_TypeJPEG = 3;
+    public static final int FILE_DISPLAY  = 4;
 
     private final int decodeColorFormat = MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible;
 
@@ -37,7 +43,7 @@ public class MediaCodecTools {
 
 
     public void setSaveFrames(String dir, int fileType) throws IOException {
-        if (fileType != FILE_TypeI420 && fileType != FILE_TypeNV21 && fileType != FILE_TypeJPEG) {
+        if (fileType != FILE_TypeI420 && fileType != FILE_TypeNV21 && fileType != FILE_TypeJPEG && fileType != FILE_DISPLAY) {
             throw new IllegalArgumentException("only support FILE_TypeI420 " + "and FILE_TypeNV21 " + "and FILE_TypeJPEG");
         }
         outputImageFileType = fileType;
@@ -57,7 +63,7 @@ public class MediaCodecTools {
      * getTrackFormat()获得视频的编码信息。再以此编码信息通过createDecoderByType()获得一个解码器，
      * 然后通过showSupportedColorFormat()就可以得到这个解码器支持的帧格式了。
      */
-    public void videoDecode(String videoFilePath) throws IOException {
+    public void videoDecode(String videoFilePath, SurfaceHolder surfaceHolder) throws IOException {
         MediaExtractor extractor = null;
         MediaCodec decoder = null;
         Log.i(TAG, "videoDecode: " + videoFilePath);
@@ -87,7 +93,7 @@ public class MediaCodecTools {
             }
 
             //获取帧转换成图片
-            decodeFramesToImage(decoder, extractor, mediaFormat);
+            decodeFramesToImage(decoder, extractor, mediaFormat, surfaceHolder);
             decoder.stop();
         } finally {
             if (decoder != null) {
@@ -119,7 +125,7 @@ public class MediaCodecTools {
         return false;
     }
 
-    private void decodeFramesToImage(MediaCodec decoder, MediaExtractor extractor, MediaFormat mediaFormat) {
+    private void decodeFramesToImage(MediaCodec decoder, MediaExtractor extractor, MediaFormat mediaFormat, SurfaceHolder holder) {
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
         boolean sawInputEOS = false;
         boolean sawOutputEOS = false;
@@ -161,28 +167,58 @@ public class MediaCodecTools {
                         image = decoder.getOutputImage(outputBufferId);
                     }
                     System.out.println("image format: " + image.getFormat());
-                    if (outputImageFileType != -1) {
-                        String fileName;
-                        switch (outputImageFileType) {
-                            case FILE_TypeI420:
-                                fileName = OUTPUT_DIR + String.format("frame_%05d_I420_%dx%d.yuv", outputFrameCount, width, height);
-                                dumpFile(fileName, getDataFromImage(image, COLOR_FormatI420));
-                                break;
-                            case FILE_TypeNV21:
-                                fileName = OUTPUT_DIR + String.format("frame_%05d_NV21_%dx%d.yuv", outputFrameCount, width, height);
-                                dumpFile(fileName, getDataFromImage(image, COLOR_FormatNV21));
-                                break;
-                            case FILE_TypeJPEG:
-                                fileName = OUTPUT_DIR + String.format("frame_%05d.jpg", outputFrameCount);
-                                compressToJpeg(fileName, image);
-                                break;
-                        }
+
+                    String fileName;
+                    switch (outputImageFileType) {
+                        case FILE_TypeI420:
+                            fileName = OUTPUT_DIR + String.format("frame_%05d_I420_%dx%d.yuv", outputFrameCount, width, height);
+                            dumpFile(fileName, getDataFromImage(image, COLOR_FormatI420));
+                            break;
+                        case FILE_TypeNV21:
+                            fileName = OUTPUT_DIR + String.format("frame_%05d_NV21_%dx%d.yuv", outputFrameCount, width, height);
+                            dumpFile(fileName, getDataFromImage(image, COLOR_FormatNV21));
+                            break;
+                        case FILE_TypeJPEG:
+                            fileName = OUTPUT_DIR + String.format("frame_%05d.jpg", outputFrameCount);
+                            compressToJpeg(fileName, image);
+                            break;
+                        case FILE_DISPLAY:
+                            Bitmap bitmap = getBitmap(image);
+                            showBitmap(holder, bitmap);
+                            if(bitmap != null){
+                                bitmap.recycle();
+                                bitmap = null;
+                            }
+                            break;
+
+                        default: break;
                     }
+
                     image.close();
                     decoder.releaseOutputBuffer(outputBufferId, true);
                 }
             }
         }
+    }
+
+    /**
+     * yuv解码后的数据转换成Bitmap图像数据
+     * @param yuvImage
+     * @param rect
+     * @return
+     * @throws IOException
+     */
+    private Bitmap yuvImageToBmpImage(YuvImage yuvImage, Rect rect) throws IOException {
+        Bitmap bmp = null;
+
+        if(yuvImage != null){
+            ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+            yuvImage.compressToJpeg(rect, 50, outputStream);
+            bmp = BitmapFactory.decodeByteArray(outputStream.toByteArray(), 0, outputStream.size());
+            outputStream.close();
+        }
+
+        return bmp;
     }
 
     /**
@@ -332,7 +368,32 @@ public class MediaCodecTools {
         YuvImage yuvImage = new YuvImage(getDataFromImage(image, COLOR_FormatNV21), ImageFormat.NV21, rect.width(), rect.height(), null);
         yuvImage.compressToJpeg(rect, 100, outStream);
 
+    }
 
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
+    private Bitmap getBitmap(Image image){
+        Bitmap bitmap = null;
+        Rect rect = image.getCropRect();
+        Log.d(TAG,rect.toString());
+        YuvImage yuvImage = new YuvImage(getDataFromImage(image, COLOR_FormatNV21), ImageFormat.NV21, rect.width(), rect.height(), null);
+
+        try {
+            bitmap = yuvImageToBmpImage(yuvImage, rect);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return bitmap;
+    }
+
+
+    private void showBitmap(SurfaceHolder surfaceHolder, Bitmap bitmap){
+
+        if (bitmap != null) {
+            Canvas mCanvas = surfaceHolder.lockCanvas();
+            mCanvas.drawBitmap(bitmap, 0, 0, null);
+            surfaceHolder.unlockCanvasAndPost(mCanvas);
+
+        }
     }
 
 
